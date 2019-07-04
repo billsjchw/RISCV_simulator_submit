@@ -8,7 +8,7 @@ private:
     static const unsigned CAPACITY = 0x3FFFF;
     unsigned char storage[CAPACITY];
 public:
-    initialize() {
+    void initialize() {
         unsigned addr = 0;
         while (!cin.eof()) {
             unsigned byte;
