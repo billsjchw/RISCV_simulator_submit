@@ -145,15 +145,13 @@ protected:
     unsigned src;
     void get_fwd() {
         stall = false;
-        if (src == 0) {
-            IDEX_rval1.write(0);
-            return;
+        if (src) {
+            bool fwd_flag = IDEX_inst.read()->fwd(EX, src, IDEX_rval1);
+            if (!fwd_flag)
+                fwd_flag = EXMEM_inst.read()->fwd(MEM, src, IDEX_rval1);
+            if (!fwd_flag)
+                MEMWB_inst.read()->fwd(WB, src, IDEX_rval1);
         }
-        bool fwd_flag = IDEX_inst.read()->fwd(EX, src, IDEX_rval1);
-        if (!fwd_flag)
-            fwd_flag = EXMEM_inst.read()->fwd(MEM, src, IDEX_rval1);
-        if (!fwd_flag)
-            MEMWB_inst.read()->fwd(WB, src, IDEX_rval1);
     }
 };
 
@@ -162,18 +160,14 @@ protected:
     unsigned src1, src2;
     void get_fwd() {
         stall = false;
-        if (src1 == 0) {
-            IDEX_rval1.write(0);
-        } else {
+        if (src1) {
             bool fwd_flag =  IDEX_inst.read()->fwd(EX, src1, IDEX_rval1);
             if (!fwd_flag)
                 fwd_flag = EXMEM_inst.read()->fwd(MEM, src1, IDEX_rval1);
             if (!fwd_flag)
                 MEMWB_inst.read()->fwd(WB, src1, IDEX_rval1);
         }
-        if (src2 == 0) {
-            IDEX_rval2.write(0);
-        } else {
+        if (src2) {
             bool fwd_flag = IDEX_inst.read()->fwd(EX, src2, IDEX_rval2);
             if (!fwd_flag)
                 fwd_flag = EXMEM_inst.read()->fwd(MEM, src2, IDEX_rval2);
@@ -198,7 +192,6 @@ public:
     }
     void write_back() {
         reg[dest].write(MEMWB_data.read());
-        reg[dest].update();
     }
     bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
         if (src == dest) {
@@ -331,7 +324,6 @@ public:
     }
     void write_back() {
         reg[dest].write(MEMWB_data.read());
-        reg[dest].update();
     }
 };
 
@@ -342,7 +334,6 @@ public:
     }
     void write_back() {
         reg[dest].write(MEMWB_data.read());
-        reg[dest].update();
     }
 };
 
@@ -358,14 +349,13 @@ public:
     NOP() {
         set(0, 0, 0, 0);
     }
-    bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
-        return false;
-    }
 };
 
+NOP nop;
+
 void Inst::bubble() {
-    IFID_inst.write_sel(new NOP);
-    IDEX_inst.write_sel(new NOP);
+    IFID_inst.write_sel(&nop);
+    IDEX_inst.write_sel(&nop);
     stall = false;
     stall_lock = true;
 }
@@ -433,7 +423,6 @@ public:
     }
     void write_back() {
         reg[dest].write(MEMWB_data.read());
-        reg[dest].update();
     }
     bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
         if (src == dest) {
@@ -441,7 +430,7 @@ public:
                 case EX:
                     if (!stall_lock)
                         stall = true;
-                    IDEX_inst.write_sel(new NOP);
+                    IDEX_inst.write_sel(&nop);
                     break;
                 case MEM: reg.write(MEMWB_data.read_input()); break;
                 case WB: reg.write(MEMWB_data.read()); break;
@@ -621,7 +610,6 @@ class LUI: public UTypeInst {
 public:
     void write_back() {
         reg[dest].write(imm);
-        reg[dest].update();
     }
     bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
         if (src == dest) {
@@ -642,7 +630,6 @@ public:
     }
     void write_back() {
         reg[dest].write(MEMWB_data.read());
-        reg[dest].update();
     }
     bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
         if (src == dest) {
@@ -697,7 +684,6 @@ public:
     }
     void write_back() {
         reg[dest].write(MEMWB_data.read());
-        reg[dest].update();
     }
 };
 
@@ -867,7 +853,7 @@ public:
         inst->inst_fetch();
         if (!IFID_inst.lock && !stall)
             IFID_inst.write(inst);
-        else
+        else if (typeid(*inst) != typeid(NOP))
             delete inst;
     }
 };
@@ -880,7 +866,7 @@ public:
         inst->inst_decode();
         if (!IDEX_inst.lock)
             IDEX_inst.write(inst);
-        else if (!stall)
+        else if (!stall && typeid(*inst) != typeid(NOP))
             delete inst;
         IDEX_pc.write(IFID_pc.read());
         IDEX_predict.write(IFID_predict.read());
@@ -913,7 +899,8 @@ public:
         Inst * inst = MEMWB_inst.read();
         // cout << "WB: " << typeid(*inst).name() << endl;;
         inst->write_back();
-        delete inst;
+        if (typeid(*inst) != typeid(NOP))
+            delete inst;
     }
 };
 
@@ -924,8 +911,8 @@ MemoryAccess mem_access;
 WriteBack write_back;
 
 void upd_reg() {
-    // for (int i = 0; i < 32; ++i)
-    //     reg[i].update();
+    for (int i = 0; i < 32; ++i)
+        reg[i].update();
     pc.update();
     IFID_inst.update();
     IFID_pc.update();
@@ -961,10 +948,10 @@ int main() {
     IFID_pc.set_lts();
     IFID_predict.set_lts();
     pc.write(0);
-    IFID_inst.write_sel(new NOP);
-    IDEX_inst.write_sel(new NOP);
-    EXMEM_inst.write_sel(new NOP);
-    MEMWB_inst.write_sel(new NOP);
+    IFID_inst.write_sel(&nop);
+    IDEX_inst.write_sel(&nop);
+    EXMEM_inst.write_sel(&nop);
+    MEMWB_inst.write_sel(&nop);
     stall = false;
     ret_flag = false;
 
@@ -978,10 +965,18 @@ int main() {
     work();
     upd_reg();
     cout << dec << (reg[10].read() & 0xFF) << endl;
-    delete IFID_inst.read();
-    delete IDEX_inst.read();
-    delete EXMEM_inst.read();
-    delete MEMWB_inst.read();
+    if (typeid(IFID_inst.read()) != typeid(NOP))
+        delete IFID_inst.read();
+    if (typeid(IDEX_inst.read()) != typeid(NOP))
+        delete IDEX_inst.read();
+    if (typeid(EXMEM_inst.read()) != typeid(NOP))
+        delete EXMEM_inst.read();
+    if (typeid(MEMWB_inst.read()) != typeid(NOP))
+        delete MEMWB_inst.read();
     
+    // delete IDEX_inst.read();
+    // delete EXMEM_inst.read();
+    // delete MEMWB_inst.read();
+
     return 0;
 }
