@@ -1,23 +1,14 @@
 #include <iostream>
 using namespace std;
 
-enum Stage {IF, ID, EX, MEM, WB};
-
-bool stall;
-bool stall_lock;
-bool ret_flag;
-
-unsigned sgnext(unsigned imm, int hi) {
-    if (imm & (1 << hi))
-        imm |= 0xFFFFFFFF >> hi << hi;
-    return imm;
-}
+const unsigned END_ADDR = 0x30004;
 
 class Memory {
 private:
-    unsigned char storage[0x400000];
+    static const unsigned CAPACITY = 0x3FFFF;
+    unsigned char storage[CAPACITY];
 public:
-    void init() {
+    void initialize() {
         unsigned addr = 0;
         while (!cin.eof()) {
             unsigned byte;
@@ -45,169 +36,81 @@ public:
     unsigned read(unsigned addr) {
         return storage[addr];
     }
-    void write_dword(unsigned addr, unsigned data) {
+    void load_dword(unsigned addr, unsigned data) {
         for (int i = 0; i < 4; ++i) {
             storage[addr + i] = data;
             data >>= 8;
         }
     }
-    void write_word(unsigned addr, unsigned data) {
+    void load_word(unsigned addr, unsigned data) {
         for (int i = 0; i < 2; ++i) {
             storage[addr + i] = data;
             data >>= 8;
         }
     }
-    void write(unsigned addr, unsigned data) {
+    void load(unsigned addr, unsigned data) {
         storage[addr] = data;
     }
 };
 
-Memory mem;
-
-template <typename DataType>
 class Register {
 private:
-    DataType input;
-    DataType output;
-    bool zero;
-    bool lts;
+    unsigned storage;
+    bool read_only;
 public:
-    bool lock;
-    Register():
-        zero(false), lts(false), lock(false) {}
-    DataType read() {
-        if (zero)
-            return 0;
-        return output;
+    Register(): read_only(false) {}
+    void load(unsigned value) {
+        if (!read_only)
+            storage = value;
     }
-    DataType read_input() {
-        return input;
+    unsigned read() {
+        return storage;
     }
-    void write(DataType data) {
-        if (!lock)
-            input = data;
-    }
-    void write_sel(DataType data) {
-        input = data;
-        lock = true;
-    }
-    void update() {
-        if (!lts || !stall)
-            output = input;
-        lock = false;
-    }
-    void set_zero() {
-        zero = true;
-    }
-    void set_lts() {
-        lts = true;
+    void set_read_only(bool flag) {
+        read_only = flag;
     }
 };
 
-Register<unsigned> reg[32];
-Register<unsigned> pc;
-Register<unsigned> IFID_pc;
-Register<unsigned> IFID_predict;
-Register<unsigned> IDEX_pc;
-Register<unsigned> IDEX_predict;
+const unsigned REGISTER_NUM = 32;
+
+Memory mem;
+Register reg[REGISTER_NUM];
+Register pc;
 
 class Inst {
 public:
     virtual void inst_fetch() {
-        unsigned addr = pc.read();
-        pc.write(addr + 4);
-        IFID_predict.write(addr + 4);
+        pc.load(pc.read() + 4);
     }
     virtual void inst_decode() {}
-    virtual void execute() {}
+    virtual void exec() {}
     virtual void mem_access() {}
     virtual void write_back() {}
-    virtual bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {}
-    void bubble();
     static Inst * parse(unsigned code);
 };
 
-Register<Inst *> IFID_inst;
-Register<Inst *> IDEX_inst;
-Register<Inst *> EXMEM_inst;
-Register<Inst *> MEMWB_inst;
+Inst * inst;
+bool prog_end;
+unsigned timer;
+unsigned ret_val;
 
-Register<unsigned> IDEX_rval1, IDEX_rval2;
-Register<unsigned> EXMEM_data;
-Register<unsigned> EXMEM_addr;
-Register<unsigned> MEMWB_data;
+unsigned IFID_inst_addr;
+unsigned IDEX_inst_addr;
+unsigned IDEX_rval1, IDEX_rval2;
+unsigned EXMEM_data;
+unsigned EXMEM_addr;
+unsigned MEMWB_data;
 
-class OneSrcInst: public Inst {
+class RTypeInst: public Inst {
 protected:
-    unsigned src;
-    void get_fwd() {
-        stall = false;
-        if (src == 0) {
-            IDEX_rval1.write(0);
-            return;
-        }
-        bool fwd_flag = IDEX_inst.read()->fwd(EX, src, IDEX_rval1);
-        if (!fwd_flag)
-            fwd_flag = EXMEM_inst.read()->fwd(MEM, src, IDEX_rval1);
-        if (!fwd_flag)
-            MEMWB_inst.read()->fwd(WB, src, IDEX_rval1);
-    }
-};
-
-class TwoSrcInst: public Inst {
-protected:
-    unsigned src1, src2;
-    void get_fwd() {
-        stall = false;
-        if (src1 == 0) {
-            IDEX_rval1.write(0);
-        } else {
-            bool fwd_flag =  IDEX_inst.read()->fwd(EX, src1, IDEX_rval1);
-            if (!fwd_flag)
-                fwd_flag = EXMEM_inst.read()->fwd(MEM, src1, IDEX_rval1);
-            if (!fwd_flag)
-                MEMWB_inst.read()->fwd(WB, src1, IDEX_rval1);
-        }
-        if (src2 == 0) {
-            IDEX_rval2.write(0);
-        } else {
-            bool fwd_flag = IDEX_inst.read()->fwd(EX, src2, IDEX_rval2);
-            if (!fwd_flag)
-                fwd_flag = EXMEM_inst.read()->fwd(MEM, src2, IDEX_rval2);
-            if (!fwd_flag)
-                MEMWB_inst.read()->fwd(WB, src2, IDEX_rval2);
-        }
-    }
-};
-
-class RTypeInst: public TwoSrcInst {
-protected:
-    unsigned dest;
+    unsigned src1, src2, dest;
 public:
     static Inst * parse(unsigned code);
     void inst_decode() {
-        IDEX_rval1.write(reg[src1].read());
-        IDEX_rval2.write(reg[src2].read());
-        get_fwd();
+        IDEX_rval1 = reg[src1].read();
+        IDEX_rval2 = reg[src2].read();
     }
-    void mem_access() {
-        MEMWB_data.write(EXMEM_data.read());
-    }
-    void write_back() {
-        reg[dest].write(MEMWB_data.read());
-    }
-    bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
-        if (src == dest) {
-            switch (stage) {
-                case EX: reg.write(EXMEM_data.read_input()); break;
-                case MEM: reg.write(EXMEM_data.read()); break;
-                case WB: reg.write(MEMWB_data.read()); break;
-                default: break;
-            }
-            return true;
-        }
-        return false;
-    }
+private:
     void set(unsigned src1, unsigned src2, unsigned dest) {
         this->src1 = src1;
         this->src2 = src2;
@@ -215,98 +118,16 @@ public:
     }
 };
 
-class ADD: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() + IDEX_rval2.read());
-    }
-};
-
-class SUB: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() - IDEX_rval2.read());
-    }
-};
-
-class SLL: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() << (IDEX_rval2.read() & 0x1F));
-    }
-};
-
-class SLT: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write((int) IDEX_rval1.read() < (int) IDEX_rval2.read());
-    }
-};
-
-class SLTU: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() < IDEX_rval2.read());
-    }
-};
-
-class XOR: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() ^ IDEX_rval2.read());
-    }
-};
-
-class SRL: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() >> (IDEX_rval2.read() & 0x1F));
-    }
-};
-
-class SRA: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write((int) IDEX_rval1.read() >> (IDEX_rval2.read() & 0x1F));
-    }
-};
-
-class OR: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() | IDEX_rval2.read());
-    }
-};
-
-class AND: public RTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() & IDEX_rval2.read());
-    }
-};
-
-class ITypeInst: public OneSrcInst {
+class ITypeInst: public Inst {
 protected:
     unsigned imm;
-    unsigned dest, shamt;
+    unsigned src, dest, shamt;
 public:
     static Inst * parse(unsigned code);
     void inst_decode() {
-        IDEX_rval1.write(reg[src].read());
-        get_fwd();
+        IDEX_rval1 = reg[src].read();
     }
-    bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
-        if (src == dest) {
-            switch (stage) {
-                case EX: reg.write(EXMEM_data.read_input()); break;
-                case MEM: reg.write(EXMEM_data.read()); break;
-                case WB: reg.write(MEMWB_data.read()); break;
-                default: break;
-            }
-            return true;
-        }
-        return false;
-    }
+private:
     void set(unsigned imm, unsigned src, unsigned dest, unsigned shamt) {
         this->imm = imm;
         this->src = src;
@@ -315,188 +136,17 @@ public:
     }
 };
 
-class JALR: public ITypeInst {
-public:
-    void execute() {
-        pc.write_sel((IDEX_rval1.read() + imm) & 0xFFFFFFFE);
-        bubble();
-        EXMEM_data.write(IDEX_pc.read() + 4);
-    }
-    void mem_access() {
-        MEMWB_data.write(EXMEM_data.read());
-    }
-    void write_back() {
-        reg[dest].write(MEMWB_data.read());
-    }
-};
-
-class ITypeCalcInst: public ITypeInst {
-public:
-    void mem_access() {
-        MEMWB_data.write(EXMEM_data.read());
-    }
-    void write_back() {
-        reg[dest].write(MEMWB_data.read());
-    }
-};
-
-class ADDI: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() + imm);
-    }
-};
-
-class NOP: public ADDI {
-public:
-    NOP() {
-        set(0, 0, 0, 0);
-    }
-    bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
-        return false;
-    }
-};
-
-void Inst::bubble() {
-    IFID_inst.write_sel(new NOP);
-    IDEX_inst.write_sel(new NOP);
-    stall = false;
-    stall_lock = true;
-}
-
-class SLTI: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write((int) IDEX_rval1.read() < (int) imm);
-    }
-};
-
-class SLTIU: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() < imm);
-    }
-};
-
-class XORI: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() ^ imm);
-    }
-};
-
-class ORI: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() | imm);
-    }
-};
-
-class ANDI: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() & imm);
-    }
-};
-
-class SLLI: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() << shamt);
-    }
-};
-
-class SRLI: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_rval1.read() >> shamt);
-    }
-};
-
-class SRAI: public ITypeCalcInst {
-public:
-    void execute() {
-        EXMEM_data.write((int) IDEX_rval1.read() >> shamt);
-    }
-};
-
-class LoadInst: public ITypeInst {
-public:
-    void execute() {
-        EXMEM_addr.write(IDEX_rval1.read() + imm);
-    }
-    void write_back() {
-        reg[dest].write(MEMWB_data.read());
-    }
-    bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
-        if (src == dest) {
-            switch (stage) {
-                case EX:
-                    if (!stall_lock)
-                        stall = true;
-                    IDEX_inst.write_sel(new NOP);
-                    break;
-                case MEM: reg.write(MEMWB_data.read_input()); break;
-                case WB: reg.write(MEMWB_data.read()); break;
-                default: break;
-            }
-            return true;
-        }
-        return false;
-    }
-};
-
-class LB: public LoadInst {
-public:
-    void mem_access() {
-        MEMWB_data.write(sgnext(mem.read(EXMEM_addr.read()), 7));
-    }
-};
-
-class LH: public LoadInst {
-public:
-    void mem_access() {
-        MEMWB_data.write(sgnext(mem.read_word(EXMEM_addr.read()), 15));
-    }
-};
-
-class LW: public LoadInst {
-public:
-    void mem_access() {
-        MEMWB_data.write(mem.read_dword(EXMEM_addr.read()));
-    }
-};
-
-class LBU: public LoadInst {
-public:
-    void mem_access() {
-        MEMWB_data.write(mem.read(EXMEM_addr.read()));
-    }
-};
-
-class LHU: public LoadInst {
-public:
-    void mem_access() {
-        MEMWB_data.write(mem.read_word(EXMEM_addr.read()));
-    }
-};
-
-class STypeInst: public TwoSrcInst {
+class STypeInst: public Inst {
 protected:
     unsigned imm;
+    unsigned src1, src2;
 public:
     static Inst * parse(unsigned code);
     void inst_decode() {
-        IDEX_rval1.write(reg[src1].read());
-        IDEX_rval2.write(reg[src2].read());
-        get_fwd();
+        IDEX_rval1 = reg[src1].read();
+        IDEX_rval2 = reg[src2].read();
     }
-    void execute() {
-        EXMEM_addr.write(IDEX_rval1.read() + imm);
-        EXMEM_data.write(IDEX_rval2.read());
-        if (EXMEM_addr.read_input() == 0x30004)
-            ret_flag = true;
-    }
+private:
     void set(unsigned imm, unsigned src1, unsigned src2) {
         this->imm = imm;
         this->src1 = src1;
@@ -504,97 +154,21 @@ public:
     }
 };
 
-class SB: public STypeInst {
-public:
-    void mem_access() {
-        mem.write(EXMEM_addr.read(), EXMEM_data.read());
-    }
-};
-
-class SH: public STypeInst {
-public:
-    void mem_access() {
-        mem.write_word(EXMEM_addr.read(), EXMEM_data.read());
-    }
-};
-
-class SW: public STypeInst {
-public:
-    void mem_access() {
-        mem.write_dword(EXMEM_addr.read(), EXMEM_data.read());
-    }
-};
-
-class BTypeInst: public TwoSrcInst {
+class BTypeInst: public Inst {
 protected:
     unsigned imm;
-    virtual bool judge(unsigned lhs, unsigned rhs) {
-        return true;
-    }
+    unsigned src1, src2;
 public:
     static Inst * parse(unsigned code);
     void inst_decode() {
-        IDEX_rval1.write(reg[src1].read());
-        IDEX_rval2.write(reg[src2].read());
-        get_fwd();
+        IDEX_rval1 = reg[src1].read();
+        IDEX_rval2 = reg[src2].read();
     }
+private:
     void set(unsigned imm, unsigned src1, unsigned src2) {
         this->imm = imm;
         this->src1 = src1;
         this->src2 = src2;
-    }
-    void execute() {
-        unsigned next_pc;
-        if (judge(IDEX_rval1.read(), IDEX_rval2.read()))
-            next_pc = IDEX_pc.read() + imm;
-        else
-            next_pc = IDEX_pc.read() + 4;
-        if (IDEX_predict.read() != next_pc) {
-            pc.write_sel(next_pc);
-            bubble();
-        }
-    }
-};
-
-class BEQ: public BTypeInst {
-private:
-    bool judge(unsigned lhs, unsigned rhs) {
-        return lhs == rhs;
-    }
-};
-
-class BNE: public BTypeInst {
-private:
-    bool judge(unsigned lhs, unsigned rhs) {
-        return lhs != rhs;
-    }
-};
-
-class BLT: public BTypeInst {
-private:
-    bool judge(unsigned lhs, unsigned rhs) {
-        return (int) lhs < (int) rhs;
-    }
-};
-
-class BGE: public BTypeInst {
-private:
-    bool judge(unsigned lhs, unsigned rhs) {
-        return (int) lhs >= (int) rhs;
-    }
-};
-
-class BLTU: public BTypeInst {
-private:
-    bool judge(unsigned lhs, unsigned rhs) {
-        return lhs < rhs;
-    }
-};
-
-class BGEU: public BTypeInst {
-private:
-    bool judge(unsigned lhs, unsigned rhs) {
-        return lhs >= rhs;
     }
 };
 
@@ -604,48 +178,10 @@ protected:
     unsigned dest;
 public:
     static Inst * parse(unsigned code);
+private:
     void set(unsigned imm, unsigned dest) {
         this->imm = imm;
         this->dest = dest;
-    }
-};
-
-class LUI: public UTypeInst {
-public:
-    void write_back() {
-        reg[dest].write(imm);
-    }
-    bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
-        if (src == dest) {
-            reg.write(imm);
-            return true;
-        }
-        return false;
-    }
-};
-
-class AUIPC: public UTypeInst {
-public:
-    void execute() {
-        EXMEM_data.write(IDEX_pc.read() + imm);
-    }
-    void mem_access() {
-        MEMWB_data.write(EXMEM_data.read());
-    }
-    void write_back() {
-        reg[dest].write(MEMWB_data.read());
-    }
-    bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
-        if (src == dest) {
-            switch (stage) {
-                case EX: reg.write(EXMEM_data.read_input()); break;
-                case MEM: reg.write(EXMEM_data.read()); break;
-                case WB: reg.write(MEMWB_data.read()); break;
-                default: break;
-            }
-            return true;
-        }
-        return false;
     }
 };
 
@@ -655,39 +191,10 @@ protected:
     unsigned dest;
 public:
     static Inst * parse(unsigned code);
+private:
     void set(unsigned imm, unsigned dest) {
         this->imm = imm;
         this->dest = dest;
-    }
-    bool fwd(Stage stage, unsigned src, Register<unsigned> & reg) {
-        if (src == dest) {
-            switch (stage) {
-                case EX: reg.write(EXMEM_data.read_input()); break;
-                case MEM: reg.write(EXMEM_data.read()); break;
-                case WB: reg.write(MEMWB_data.read()); break;
-                default: break;
-            }
-            return true;
-        }
-        return false;
-    }
-};
-
-class JAL: public JTypeInst {
-public:
-    void inst_fetch() {
-        unsigned addr = pc.read();
-        pc.write(addr + imm);
-        IFID_predict.write(addr + 4);
-    }
-    void execute() {
-        EXMEM_data.write(IDEX_pc.read() + 4);
-    }
-    void mem_access() {
-        MEMWB_data.write(EXMEM_data.read());
-    }
-    void write_back() {
-        reg[dest].write(MEMWB_data.read());
     }
 };
 
@@ -706,6 +213,345 @@ Inst * Inst::parse(unsigned code) {
     else if (opcode = 0x6F)
         return JTypeInst::parse(code);
 }
+
+unsigned sgnext(unsigned imm, int hi) {
+    if (imm & (1 << hi))
+        imm |= 0xFFFFFFFF >> hi << hi;
+    return imm;
+}
+
+class LUI: public UTypeInst {
+public:
+    void write_back() {
+        reg[dest].load(imm);
+    }
+};
+
+class AUIPC: public UTypeInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_inst_addr + imm;
+    }
+    void mem_access() {
+        MEMWB_data = EXMEM_data;
+    }
+    void write_back() {
+        reg[dest].load(MEMWB_data);
+    }
+};
+
+class JAL: public JTypeInst {
+public:
+    void inst_fetch() {
+        pc.load(pc.read() + imm);
+    }
+    void exec() {
+        EXMEM_data = IDEX_inst_addr + 4;
+    }
+    void mem_access() {
+        MEMWB_data = EXMEM_data;
+    }
+    void write_back() {
+        reg[dest].load(MEMWB_data);
+    }
+};
+
+class JALR: public ITypeInst {
+public:
+    void exec() {
+        pc.load((IDEX_rval1 + imm) & 0xFFFFFFFE);
+        EXMEM_data = IDEX_inst_addr + 4;
+    }
+    void mem_access() {
+        MEMWB_data = EXMEM_data;
+    }
+    void write_back() {
+        reg[dest].load(MEMWB_data);
+    }
+};
+
+class BEQ: public BTypeInst {
+public:
+    void exec() {
+        if (IDEX_rval1 == IDEX_rval2)
+            pc.load(IDEX_inst_addr + imm);
+    }
+};
+
+class BNE: public BTypeInst {
+public:
+    void exec() {
+        if (IDEX_rval1 != IDEX_rval2)
+            pc.load(IDEX_inst_addr + imm);
+    }
+};
+
+class BLT: public BTypeInst {
+public:
+    void exec() {
+        if ((int) IDEX_rval1 < (int) IDEX_rval2)
+            pc.load(IDEX_inst_addr + imm);
+    }
+};
+
+class BGE: public BTypeInst {
+public:
+    void exec() {
+        if ((int) IDEX_rval1 >= (int) IDEX_rval2)
+            pc.load(IDEX_inst_addr + imm);
+    }
+};
+
+class BLTU: public BTypeInst {
+public:
+    void exec() {
+        if (IDEX_rval1 < IDEX_rval2)
+            pc.load(IDEX_inst_addr + imm);
+    }
+};
+
+class BGEU: public BTypeInst {
+public:
+    void exec() {
+        if (IDEX_rval1 >= IDEX_rval2)
+            pc.load(IDEX_inst_addr + imm);
+    }
+};
+
+class LoadInst: public ITypeInst {
+public:
+    void exec() {
+        EXMEM_addr = IDEX_rval1 + imm;
+    }
+    void write_back() {
+        reg[dest].load(MEMWB_data);
+    }
+};
+
+class LB: public LoadInst {
+public:
+    void mem_access() {
+        MEMWB_data = sgnext(mem.read(EXMEM_addr), 7);
+    }
+};
+
+class LH: public LoadInst {
+public:
+    void mem_access() {
+        MEMWB_data = sgnext(mem.read_word(EXMEM_addr), 15);
+    }
+};
+
+class LW: public LoadInst {
+public:
+    void mem_access() {
+        MEMWB_data = mem.read_dword(EXMEM_addr);
+    }
+};
+
+class LBU: public LoadInst {
+public:
+    void mem_access() {
+        MEMWB_data = mem.read(EXMEM_addr);
+    }
+};
+
+class LHU: public LoadInst {
+public:
+    void mem_access() {
+        MEMWB_data = mem.read_word(EXMEM_addr);
+    }
+};
+
+class StoreInst: public STypeInst {
+public:
+    void exec() {
+        EXMEM_addr = IDEX_rval1 + imm;
+        EXMEM_data = IDEX_rval2;
+    }
+};
+
+class SB: public StoreInst {
+public:
+    void exec() {
+        EXMEM_addr = IDEX_rval1 + imm;
+        EXMEM_data = IDEX_rval2;
+        if (EXMEM_addr == END_ADDR) {
+            ret_val = reg[10].read() & 0xFF;
+            prog_end = true;
+        }
+    }
+    void mem_access() {
+        mem.load(EXMEM_addr, EXMEM_data);
+    }
+};
+
+class SH: public StoreInst {
+public:
+    void mem_access() {
+        mem.load_word(EXMEM_addr, EXMEM_data);
+    }
+};
+
+class SW: public StoreInst {
+public:
+    void mem_access() {
+        mem.load_dword(EXMEM_addr, EXMEM_data);
+    }
+};
+
+class ITypeCalcInst: public ITypeInst {
+public:
+    void mem_access() {
+        MEMWB_data = EXMEM_data;
+    }
+    void write_back() {
+        reg[dest].load(MEMWB_data);
+    }
+};
+
+class ADDI: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 + imm;
+    }
+};
+
+class SLTI: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = (int) IDEX_rval1 < (int) imm;
+    }
+};
+
+class SLTIU: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 < imm;
+    }
+};
+
+class XORI: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 ^ imm;
+    }
+};
+
+class ORI: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 | imm;
+    }
+};
+
+class ANDI: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 & imm;
+    }
+};
+
+class SLLI: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 << shamt;
+    }
+};
+
+class SRLI: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 >> shamt;
+    }
+};
+
+class SRAI: public ITypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = (int) IDEX_rval1 >> shamt;
+    }
+};
+
+class RTypeCalcInst: public RTypeInst {
+public:
+    void mem_access() {
+        MEMWB_data = EXMEM_data;
+    }
+    void write_back() {
+        reg[dest].load(MEMWB_data);
+    }
+};
+
+class ADD: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 + IDEX_rval2;
+    }
+};
+
+class SUB: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 - IDEX_rval2;
+    }
+};
+
+class SLL: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 << (IDEX_rval2 & 0x1F);
+    }
+};
+
+class SLT: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = (int) IDEX_rval1 < (int) IDEX_rval2;
+    }
+};
+
+class SLTU: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 < IDEX_rval2;
+    }
+};
+
+class XOR: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 ^ IDEX_rval2;
+    }
+};
+
+class SRL: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 >> (IDEX_rval2 & 0x1F);
+    }
+};
+
+class SRA: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = (int) IDEX_rval1 >> (IDEX_rval2 & 0x1F);
+    }
+};
+
+class OR: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 | IDEX_rval2;
+    }
+};
+
+class AND: public RTypeCalcInst {
+public:
+    void exec() {
+        EXMEM_data = IDEX_rval1 & IDEX_rval2;
+    }
+};
 
 Inst * RTypeInst::parse(unsigned code) {
     RTypeInst * ret;
@@ -845,59 +691,44 @@ Inst * JTypeInst::parse(unsigned code) {
     return (Inst *) ret;
 }
 
+
 class InstFetch {
 public:
     void work() {
         unsigned addr = pc.read();
-        IFID_pc.write(addr);
-        unsigned code = mem.read_dword(addr);
-        Inst * inst = Inst::parse(code);
+        IFID_inst_addr = addr;
+        delete inst;
+        inst = Inst::parse(mem.read_dword(addr));
         inst->inst_fetch();
-        if (!IFID_inst.lock)
-            IFID_inst.write(inst);
-        else
-            delete inst;
     }
 };
 
 class InstDecode {
 public:
-    void work() {
-        Inst * inst = IFID_inst.read();
+    void work(Inst * inst) {
+        IDEX_inst_addr = IFID_inst_addr;
         inst->inst_decode();
-        if (!IDEX_inst.lock)
-            IDEX_inst.write(inst);
-        else if (!stall)
-            delete inst;
-        IDEX_pc.write(IFID_pc.read());
-        IDEX_predict.write(IFID_predict.read());
     }
 };
 
 class Execute {
 public:
-    void work() {
-        Inst * inst = IDEX_inst.read();
-        inst->execute();
-        EXMEM_inst.write(inst);
+    void work(Inst * inst) {
+        inst->exec();
     }
 };
 
 class MemoryAccess {
 public:
-    void work() {
-        Inst * inst = EXMEM_inst.read();
+    void work(Inst * inst) {
         inst->mem_access();
-        MEMWB_inst.write(inst);
     }
 };
 
 class WriteBack {
 public:
-    void work() {
-        Inst * inst = MEMWB_inst.read();
+    void work(Inst * inst) {
         inst->write_back();
-        delete inst;
     }
 };
 
@@ -907,63 +738,27 @@ Execute execute;
 MemoryAccess mem_access;
 WriteBack write_back;
 
-void upd_reg() {
-    for (int i = 0; i < 32; ++i)
-        reg[i].update();
-    pc.update();
-    IFID_inst.update();
-    IFID_pc.update();
-    IFID_predict.update();
-    IDEX_inst.update();
-    IDEX_pc.update();
-    IDEX_predict.update();
-    IDEX_rval1.update();
-    IDEX_rval2.update();
-    EXMEM_addr.update();
-    EXMEM_data.update();
-    EXMEM_inst.update();
-    MEMWB_data.update();
-    MEMWB_inst.update();
-}
-
-void work() {
-    execute.work();
-    mem_access.work();
-    inst_decode.work();
-    inst_fetch.work();
-    write_back.work();
-}
-
 int main() {
-    mem.init();
-    reg[0].set_zero();
-    pc.set_lts();
-    IFID_inst.set_lts();
-    IFID_pc.set_lts();
-    IFID_predict.set_lts();
-    pc.write(0);
-    IFID_inst.write_sel(new NOP);
-    IDEX_inst.write_sel(new NOP);
-    EXMEM_inst.write_sel(new NOP);
-    MEMWB_inst.write_sel(new NOP);
-    stall = false;
-    ret_flag = false;
+    pc.load(0);
+    mem.initialize();
+    reg[0].load(0);
+    reg[0].set_read_only(true);
+    prog_end = false;
+    timer = 0;
+    inst = NULL;
 
-    while (!ret_flag) {
-        stall_lock = false;
-        upd_reg();
-        work();
+    while (!prog_end) {
+        switch (timer) {
+            case 0: inst_fetch.work(); break;
+            case 1: inst_decode.work(inst); break;
+            case 2: execute.work(inst); break;
+            case 3: mem_access.work(inst); break;
+            case 4: write_back.work(inst); break;
+            default: break;
+        }
+        timer = (timer + 1) % 5;
     }
-    stall_lock = false;
-    upd_reg();
-    work();
-    upd_reg();
-    cout << (reg[10].read() & 0xFF) << endl;
-    
-    delete IFID_inst.read();
-    delete IDEX_inst.read();
-    delete EXMEM_inst.read();
-    delete MEMWB_inst.read();
-    
+
+    cout << ret_val << endl;
     return 0;
 }
