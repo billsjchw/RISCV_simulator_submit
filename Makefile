@@ -1,2 +1,2 @@
 code:RISCV_simulator_parallel.cpp
-	g++ RISCV_simulator_parallel.cpp -o code -std=c++11
+	g++ RISCV_simulator_parallel.cpp -o code -std=c++11 -pg
