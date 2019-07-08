@@ -3,11 +3,15 @@
 
 #include "Register.hpp"
 #include "Memory.hpp"
+#include "Predictor.hpp"
+#include <unordered_map>
 
 Memory mem;
 Register reg[32];
 Register pc;
 bool stall, bubble, ret;
+std::unordered_map<unsigned, Predictor> pred;
+unsigned branch, correct;
 
 enum Stage {IF, ID, EX, MEM, WB};
 
@@ -368,7 +372,8 @@ protected:
 public:
     void pc_modify() {
         cur_pc = pc.read();
-        pred_pc = cur_pc + 4;
+        bool taken = pred[cur_pc].predict();
+        pred_pc = cur_pc + (taken ? imm : 4);
         pc.write(pred_pc);
     }
     void inst_decode() {
@@ -378,12 +383,16 @@ public:
         get_fwd(src2, rhs);
     }
     void execute() {
+        ++branch;
         unsigned next_pc;
-        next_pc = cur_pc + (judge(lhs, rhs) ? imm : 4);
+        bool taken = judge(lhs, rhs);
+        next_pc = cur_pc + (taken ? imm : 4);
         if (pred_pc != next_pc) {
             pc.write(next_pc);
             bubble = true;
-        }
+        } else
+            ++correct;
+        pred[cur_pc].update(taken);
     }
     virtual bool judge(unsigned lhs, unsigned rhs) {
         return true;
