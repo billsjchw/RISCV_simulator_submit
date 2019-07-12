@@ -282,7 +282,7 @@ public:
         }
         return false;
     }
- };
+};
 
 class LB: public LoadInst {
 public:
